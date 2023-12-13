@@ -1,0 +1,44 @@
+[tool.poetry]
+name = "up_crawler"
+version = "0.1.3"
+description = "Crawls the UP website and downloads articles in three languages, saves crawling results as json."
+authors = ["Hamotskyi, Serhii <serhii.hamotskyi@hs-anhalt.de>", "Hamotskyi, Serhii <serhii@serhii.net>"]
+
+[tool.poetry.dependencies]
+# python = ">=3.8"
+python = "3.10"
+bs4 = "^0.0.1"
+requests = "^2.31.0"
+pdbpp = "^0.10.3"
+dataclass-wizard = "^0.22.2"
+dateparser = "^1.1.8"
+numpy = "^1.26.1"
+pandas = "^2.1.1"
+rich = "^13.7.0"
+advertools = "^0.13.5"
+pytest = "^7.4.3"
+tqdm = "^4.66.1"
+tenacity = "^8.2.3"
+newspaper3k = "^0.2.8"
+
+[tool.poetry.dev-dependencies]
+# pytest = "^5.2"
+black = "^23.9.1"
+
+[tool.poetry.group.dev.dependencies]
+pdbpp = "^0.10.3"
+
+[tool.pytest.ini_options]
+markers = [
+  "now: test I'm working on now",
+]
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.scripts]
+up_get_uris = "up_crawler.get_uris:main"
+up_crawl_uris = "up_crawler.bs_oop:main"
+up_run = "up_crawler.__main__:main"
+up_convert = "up_crawler.up_reader:main"

@@ -1,0 +1,672 @@
+import pdb
+import sys
+import traceback
+import argparse
+
+import requests
+import re
+import random
+
+from pathlib import Path
+
+from bs4 import BeautifulSoup
+from unicodedata import normalize
+from urllib.parse import urlparse
+from dataclass_wizard import JSONSerializable, JSONWizard
+import pandas as pd
+
+from tqdm import tqdm
+from tqdm.contrib.logging import logging_redirect_tqdm
+
+import dateparser
+from datetime import datetime
+
+import logging
+
+from dataclasses import dataclass
+from enum import Enum
+
+import rich
+from rich import inspect, print
+
+from up_crawler.data_structures import (
+    Language,
+    ListOfArticleURIs,
+    Article,
+    FullArticle,
+    Tag,
+    Tags,
+    Corpus,
+)
+
+from up_crawler.randomization import RandomizationParams
+from up_crawler.consts import URI_REGEX, UP_DAY_FORMAT, URI_REGEX, SUPPORTED_DOMAINS, URI_DAY_FORMAT
+
+from up_crawler.consts import SITEMAP_CURRENT_MONTH_URI, SITEMAP_MONTH_ARCHIVE_URI
+
+from typing import List, Tuple, Optional, Dict, Union
+
+logging.basicConfig()
+logger = logging.getLogger(__package__)
+
+random.seed()
+b = breakpoint
+
+# Set to False when running for real; if True, starts pdb on exceptions instead of trying to catch them
+DEBUG = True
+
+
+class UPCrawler:
+    """
+    Downloads articles from Ukrainska Pravda (https://www.pravda.com.ua/).
+
+    Downloads articles in Ukrainian, as well as Russian and English if present.
+    """
+
+    # Paragraphs matching either of those will be skipped
+    REGEX_PARAS_TO_SKIP = [
+        r".*Follow Ukrainska Pravda on Twitter.*",
+        ".*Follow us on Twitter.*",
+    ]
+
+    def __init__(self, backup_dir: Path, target_dir: Optional[Path] = None, **kwargs):
+        self.backup_dir = backup_dir
+        self.target_dir = target_dir
+        self.randomization_params = RandomizationParams(**kwargs)
+
+    ######
+    # SITEMAP
+    ######
+    def get_sitemaps(self):
+        pass
+
+
+    @staticmethod
+    def _get_sitemap_by_month(
+        day: datetime
+    ):  # , lang:Optional[Language]=Language.UA):
+        """Generate Ukrainian-only UP page with articles for a certain day, e.g.
+        https://www.pravda.com.ua/archives/date_26092023/
+
+        Args:
+            day (datetime): datetime for the day needed
+            up_day_format: format string for datetime->26092023
+            uri_day_format: format string for pravda URI
+        """
+        lang_part = ""
+        up_day_str = day.strftime(up_day_format)
+        up_uri = uri_day_format.format(lang_part=lang_part, up_day_date=up_day_str)
+        return up_uri
+
+
+    def get_uri_list_from_dates(
+        d1: Union[datetime, str],
+        d2: Optional[Union[datetime, str]] = "yesterday",
+        randomization_params: RandomizationParams = RandomizationParams(),
+    ) -> Dict[str, list[str]]:
+        """Given two datetimes, return UP day-URIs with articles on those days.
+
+        - Fuzzy bits like "last month" possible in params
+        - d2 empty means "yesterday" inclusive
+
+        Returns dict with keys like 2023-02-01 and values a list of UA URIs
+
+        Actually...
+            - https://www.pravda.com.ua/sitemap/sitemap-archive.xml
+            - https://www.pravda.com.ua/sitemap/sitemap-2023-04.xml.gz
+        """
+
+        logger.debug(f"Getting links from {d1} to {d2}")
+        d1p = dateparser.parse(d1) if isinstance(d1, str) else d1
+        d2p = dateparser.parse(d2) if isinstance(d2, str) else d2
+
+        logger.debug(f"\t parsed into {d1p} {d2p}")
+        date_range = pd.date_range(start=d1p, end=d2p, freq="D")
+
+        # Generate URIs for day pages in UP
+        uris = dict()
+        for d in date_range:
+            day_key = d.strftime("%Y-%m-%d")
+            uris[day_key] = _generate_uri_from_day(day=d)
+
+        # Crawl each to get a list of article URIs contained therein
+        all_uris = dict()
+        for d, u in uris.items():
+            day_uris = crawl_newsbydate_uri(
+                uri=u, randomization_params=randomization_params
+            )
+            all_uris[d] = day_uris
+
+        return all_uris
+
+
+
+
+
+    ######
+    # NETWORKING
+    ######
+    @staticmethod
+    def do_basic_uri_ops_when_crawling(
+        uri: str,
+        randomization_params: Optional[RandomizationParams] = RandomizationParams(),
+    ) -> Optional[BeautifulSoup]:
+        """Gets the soup, or returns None if errors happened"""
+
+        logger.debug(f"Using randomization: {randomization_params}")
+
+        # wait
+        randomization_params.random_wait()
+
+        # be polite
+        useragent = randomization_params.get_useragent()
+        headers = {"user-agent": useragent}
+        logger.debug(f"Using headers: {headers}")
+
+        website = requests.get(uri, headers=headers)
+
+        if website.status_code != 200:
+            if website.status_code != 404:
+                logger.info(f"{uri} returned status code {website.status_code}")
+
+            # Be a good scraper and fail loudly at the first sign of problems
+            if website.status_code == 403:
+                logger.error(f"403! {uri} returned status code {website.status_code}")
+                raise ValueError("403")
+            return None
+
+        soup = BeautifulSoup(
+            website.content, "html.parser", from_encoding=website.encoding
+        )
+
+        if website.status_code == 404 or "404" in soup.title.text:
+            logger.debug(f"{uri} not found")
+            return None
+        logger.debug(f"Returning soup")
+        return soup
+
+
+#############################
+### Functions
+#############################
+
+
+def parse_article_uri(uri: str, uri_regex=URI_REGEX) -> Dict[str, Union[str, Language]]:
+    """Parses an URI returning a dict with domain, lang and article id"""
+    m = uri_regex.match(uri)
+    groups = m.groupdict()
+    lang = groups["lang"]
+    if lang is None:
+        lang = Language.UA
+    elif lang == "rus":
+        lang = Language.RU
+    else:
+        lang = Language.EN
+
+    groups["lang"] = lang
+
+    return groups
+
+
+def crawl_article_uri(
+    uri: str,
+    #  regex_paras_to_skip: Optional[list[str]] = REGEX_PARAS_TO_SKIP,
+    regex_paras_to_skip: Optional[list[str]] = None,
+    randomization_params: RandomizationParams = RandomizationParams(),
+) -> Optional[Article]:
+    """crawl_single_uri, with Article in one language
+
+    Args:
+        uri (str): uri
+        regex_paras_to_skip: list of regexes, paras matching any of those won't be collected
+
+    Returns:
+        Optional[Article]: None if there was a 404
+    """
+    soup = do_basic_uri_ops_when_crawling(
+        uri=uri, randomization_params=randomization_params
+    )
+    # If we got an error, pass return it up
+    if not soup:
+        return soup
+
+    title = soup.find_all("h1")[0].text
+
+    try:
+        author_name = soup.find_all("span", class_="post_author")[0].a.text
+    except IndexError:
+        author_name = None
+
+    tags = list()
+    tags_spans = soup.find_all("span", class_="post_tags_item")
+
+    # No tags in English version
+    if tags_spans:
+        for span in tags_spans:
+            tag_name = span.text
+            tag_link = span.a["href"]
+        tags.append((tag_name, tag_link))
+
+    text_raw = soup.find_all("div", class_="post_text")[0]
+    text_paras = text_raw.find_all("p")
+    text = list()
+
+    # Add non-empty paragraphs as list of strings
+    for para in text_paras:
+        # if not-empty
+        if para.text:
+            # if not matching any of the bad regexes (if we set some)
+            if regex_paras_to_skip:
+                flag = False
+                for r in regex_paras_to_skip:
+                    if re.compile(r).match(para.text):
+                        flag = True
+                if flag:
+                    continue
+            # Normalize to replace all nonbreakable space and friends
+            #  see https://stackoverflow.com/questions/10993612/how-to-remove-xa0-from-string-in-python
+            norm_text = normalize("NFKC", para.text).strip()
+            if norm_text:
+                text.append(norm_text)
+
+    parsed_uri = parse_article_uri(uri)
+
+    article = Article(
+        uri=uri,
+        title=title,
+        author_name=author_name,
+        tags=tags,
+        text=text,
+        raw_html=text_raw,  # TODO isn't it better to save the ENTIRE page here?
+        lang=parsed_uri["lang"],
+        art_id=parsed_uri["art_id"],
+    )
+    return article
+
+
+def _generate_all_langs_from_uri(uri) -> Dict[Language, str]:
+    """Given an URI, generates the set of all 3 URIs for 3 languages for
+    that article, including the provided one."""
+    r = parse_article_uri(uri)
+
+    uris = dict()
+
+    for l in Language:
+        # Add a slash if it's not Ukrainian
+        lang_part = l.value + "/" if l.value else l.value
+        uri_option = URI_FORMAT.format(lang_part=lang_part, art_id=r["art_id"])
+        # Has an additonal / in Ukrainian, doesn't matter but let's remove it for cleanliness
+        uris[l] = uri_option
+
+    # sanity check - should return the same URI for input language
+    assert uris[r["lang"]] == uri
+    return uris
+
+
+def process_article_uri(
+    uri: str, randomization_params: RandomizationParams = RandomizationParams()
+) -> Dict[Language, Article]:
+    """Given an URI, attempts to scrape all three languages of that article."""
+    logger.debug(f"Processing {uri}")
+    uri_langs = _generate_all_langs_from_uri(uri=uri)
+    logger.debug(f"Generated three URI candidates: {uri_langs}")
+    articles = dict()
+    for l, u in uri_langs.items():
+        try:
+            art = crawl_article_uri(uri=u, randomization_params=randomization_params)
+            articles[l] = art
+        except Exception as e:
+            logger.error(f"Encountered exception when crawling {u}: {e}")
+
+            # If GLOBAL(!) DEBUG is True, run pdbpp
+            if DEBUG:
+                b()
+    return articles
+
+
+def crawl_newsbydate_uri(
+    uri: str,
+    supported_domains: List[str] = SUPPORTED_DOMAINS,
+    news_only=True,
+    randomization_params: RandomizationParams = RandomizationParams(),
+):
+    """Crawls an URI like https://www.pravda.com.ua/news/date_10102023/
+        returning a list of URIs of articles mentioned therein.
+
+    TODO: news_only means only /news/ articles,  not /columns/ /articles/ etc.
+
+    Args:
+        uri (str): uri
+        supported_domains (List[str]): e.g. ['www.pravda.com.ua']
+            - set to a list of what urlparse calls `netloc`
+            - used to filter out the not yet supported occasional links to:
+                - epravda
+                - life.pravda.com.ua
+                - eurointegration.com.ua
+    """
+
+    logger.info(f"Processing {uri}")
+    soup = do_basic_uri_ops_when_crawling(
+        uri=uri, randomization_params=randomization_params
+    )
+    if not soup:
+        return soup
+
+    # Get the domain without the page, e.g. https://pravda.com.ua
+    domain_info = urlparse(uri)
+    host_bit = domain_info.scheme + "://" + domain_info.netloc
+
+    # Parse links from page to full URIs
+    art_links = list()
+    art_spans = soup.find_all("div", class_="article_header")
+    for span in art_spans:
+        art_link_title = span.text
+        art_link_uri = span.a["href"]
+        art_uri = host_bit + art_link_uri
+
+        art_link_domain_info = urlparse(art_uri)
+        if supported_domains and art_link_domain_info.netloc in supported_domains:
+            if news_only and "/news/" in art_uri:
+                logger.debug(f"\tAppending {art_uri}")
+                art_links.append(art_uri)
+            else:
+                logger.debug(f"\tSkipping not yet supported non-/news/ {art_uri}")
+        else:
+            logger.debug(
+                f"\tSkipping unsupported {art_link_domain_info.netloc} {art_uri}"
+            )
+
+    return art_links
+
+def get_article_links_by_day(
+    d1: Union[datetime, str],
+    d2: Optional[Union[datetime, str]] = "yesterday",
+    output_file: Optional[Path | str] = None,
+    randomization_params: RandomizationParams = RandomizationParams(),
+) -> ListOfArticleURIs:
+    """Get the UA articles posted in UP on days between d1 and d2.
+
+    Saves to output_file, either provided or one will be chosen.
+
+    Both dates can be datetimes or human ('last week'),  if d2 is missing it will
+    be interpreted to mean 'yesterday'.
+
+    Args:
+        d1 (Union[datetime, str]): date, as  "last week" or datetime
+        d2 (Optional[Union[datetime, str]]): -/-, empty=='yesterday'
+    """
+    uris_days = get_uri_list_from_dates(
+        d1=d1, d2=d2, randomization_params=randomization_params
+    )
+
+    ac = ListOfArticleURIs(arts=uris_days)
+    logger.info(f"{ac}")
+    save_path = ac.save(output_file)
+    logger.info(f"Saved list of crawled URIs to {save_path}")
+    return ac
+
+
+def crawl_all_uris(
+    input_fa: Path | ListOfArticleURIs,
+    output_file: Optional[Path | str] = None,
+    randomization_params: RandomizationParams = RandomizationParams(),
+    backup_dir: Optional[Path] = None,
+) -> list[FullArticle]:
+    """Get ArticlesToCrawl from input_path, return a list of FullArticles
+    of the crawled articles."""
+    articles = (
+        ListOfArticleURIs.from_json(input_fa.read_text())
+        if isinstance(input_fa, Path)
+        else input_fa
+    )
+    if isinstance(input_fa, Path):
+        logger.info(f"Read file {input_fa}: {articles}")
+
+    fas = list()
+
+    num_articles = sum(len(x[1]) for x in articles.items())
+    # pretty logging
+    with logging_redirect_tqdm():
+        # total number of articles as separate progress bar
+        with tqdm(total=num_articles, desc="total") as pbar:
+            for date, arts in tqdm(articles.items(), leave=False, desc="days"):
+                #  logger.info(f"Crawling {len(arts)} articles for {date}")
+                #  tqdm.write(f"Crawling {len(arts)} articles for {date}") for u in tqdm(arts, leave=False, desc=f"{date}"):
+                logging.info(f"Crawling {len(arts)} articles for {date}")
+                for u in tqdm(arts, leave=False, desc=f"{date}"):
+                    res = process_article_uri(
+                        u, randomization_params=randomization_params
+                    )
+                    fa = FullArticle(
+                        arts=res,
+                        date=date,
+                    )
+
+                    fas.append(fa)
+                    pbar.update()
+        # TODO - add backup temporary saving of corpus to /tmp every N days
+
+    c = build_corpus(fas=fas)
+    save_path = c.save(output_file)
+
+    logger.info(f"Saved list of crawled articles to {save_path}")
+    return c
+
+
+def build_tags(fas: list[FullArticle]) -> Tags:
+    """Given a list of FullArticles
+    - build Tags with the correct RU and UA language names for each tag:
+    - for each full article, set its Tags with the correct newly build tag
+    """
+
+    tags = Tags(tags=dict())
+    for fa in fas:
+        # get all tags from both languages in the article
+
+        for lang in [Language.UA, Language.RU]:
+            tags_art = fa.arts[lang].tags
+            for tag in tags_art:
+                tag_name, tag_uri = tag[0], tag[1]
+                # clean the Russian bit in the tag URI
+                tag_uri = tag_uri.replace("/rus", "")
+                tags.return_add(uri=tag_uri, name=tag_name, lang=lang)
+
+        # Set the article tags based on the Ukrainian ones
+
+    # Now we have all the tags we need, we set the correct ones in each of the full articles
+    for fa in fas:
+        fa_tags = list()  # will contain the final parsed tags of the article:
+        fa_tags = [tags.tags[t[1]] for t in fa.arts[Language.UA].tags]
+        fa.tags = fa_tags
+    return tags
+
+
+def build_corpus(fas: list[FullArticle]) -> Corpus:
+    """Given a list of FullArticles build a Corpus:
+    - match and align tags
+    """
+
+    # get all tag translations for all arts, and set them
+    tags = build_tags(fas=fas)
+
+    c = Corpus(arts=fas, tags=tags)
+    #  b()
+    return c
+
+
+#############################
+### Run
+#############################
+
+
+def _parse_timeout(args) -> RandomizationParams:
+    if args.timeout == -1:
+        rw = RandomizationParams(max_wait_sec=0, wait_eps=0)
+    else:
+        rw = RandomizationParams(max_wait_sec=args.timeout)
+    return rw
+
+
+def run_get(args):
+    date_1 = args.date_start  # if d1 else "3 days ago"
+    date_2 = args.date_end  # if d2 else 'yesterday'
+    output_path = args.output
+
+    rw = _parse_timeout(args)
+
+    res = get_article_links_by_day(
+        date_1, date_2, output_file=output_path, randomization_params=rw
+    )
+
+    if args.pdb:
+        breakpoint()
+
+
+def run_crawl(args):
+    assert args.input, "Provide path to json with URIs to crawl"
+    logger.info(f"Crawling things at file {args.input}")
+
+    rw = _parse_timeout(args)
+
+    res = crawl_all_uris(args.input, output_file=args.output, randomization_params=rw)
+    if args.pdb:
+        breakpoint()
+
+
+def parse_args_get() -> argparse.Namespace:
+    DEFAULT_START_DATE = "three days ago"
+    DEFAULT_END_DATE = "yesterday"
+
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--output",
+        "-o",
+        help="Output for the list of article URIs(%(default)s)",
+        type=Path,
+    )
+    parser.add_argument(
+        "--date_start",
+        "-ds",
+        help="Starting date for articles to be parsed, as str (%(default)s)",
+        type=str,
+        default=DEFAULT_START_DATE,
+    )
+    parser.add_argument(
+        "--date_end",
+        "-de",
+        help="End data for articles, empty=='yesterday' (%(default)s)",
+        type=str,
+        default=DEFAULT_END_DATE,
+    )
+    parser.add_argument(
+        "--timeout",
+        "-t",
+        type=int,
+        default=5,
+        help="""Max timeout when crawling articles, set to -1 to disable \
+                all kinds of randomization. (%(default)s)""",
+    )
+    parser.add_argument("--pdb", "-P", help="Run PDB on exception", action="store_true")
+    parser.add_argument(
+        "-q",
+        help="Output only warnings",
+        action="store_const",
+        dest="loglevel",
+        const=logging.WARN,
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        help="Output more details",
+        action="store_const",
+        dest="loglevel",
+        const=logging.DEBUG,
+    )
+    return parser.parse_args()
+
+
+def parse_args_crawl() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--input",
+        "-i",
+        help="Input file with the file containing article URIs to crawl",
+        type=Path,
+    )
+    parser.add_argument(
+        "--output",
+        "-o",
+        help="Output for the dataset (%(default)s)",
+        type=Path,
+    )
+    parser.add_argument(
+        "--timeout",
+        "-t",
+        type=int,
+        default=5,
+        help="""Max timeout when crawling articles, set to -1 to disable \
+                all kinds of randomization. (%(default)s)""",
+    )
+    parser.add_argument("--pdb", "-P", help="Run PDB on exception", action="store_true")
+    parser.add_argument(
+        "-q",
+        help="Output only warnings",
+        action="store_const",
+        dest="loglevel",
+        const=logging.WARN,
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        help="Output more details",
+        action="store_const",
+        dest="loglevel",
+        const=logging.DEBUG,
+    )
+    return parser.parse_args()
+
+
+def main(mode: str = "get"):
+    args = parse_args_get() if mode == "get" else parse_args_crawl()
+    logger.setLevel(args.loglevel if args.loglevel else logging.INFO)
+
+    logger.debug(args)
+
+    try:
+        if mode == "get":
+            run_get(args)
+        elif mode == "crawl":
+            run_crawl(args)
+        else:
+            raise NotImplementedError
+    except Exception as e:
+        if args.pdb:
+            extype, value, tb = sys.exc_info()
+            traceback.print_exc()
+            pdb.post_mortem(tb)
+        else:
+            raise e
+
+
+def main_get():
+    main(mode="get")
+
+
+def main_crawl():
+    main(mode="crawl")
+
+
+if __name__ == "__main__":
+    main()
+
+
+######
+# TODO:
+#   - support not just /news/ but also /articles/, /columns/ etc.
+#   - "що передувало": https://www.pravda.com.ua/news/2023/10/10/7423534/
+#       - or just remove the text itself if I won't be implementing that
+#       - generally, look into all article texts that end up in ":"
+#   - "I'm running, and I haven't crawled stuff for 5 days, I'll go through the 5 days" or something
+
+#  c.arts[0].arts[Language.RU].text
