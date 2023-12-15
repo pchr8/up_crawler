@@ -4,8 +4,10 @@ import time
 from dataclasses import dataclass
 
 import logging
+
 logging.basicConfig()
 logger = logging.getLogger(__package__)
+
 
 @dataclass
 class RandomizationParams:
@@ -15,10 +17,12 @@ class RandomizationParams:
     - picking a random useragent from list
     """
 
-    # let's do _ethical crawling_ (c)(tm)(r) 
-    POLITE_USERAGENT = """Dear Ukrainska Pravda, I'm writing a masters thesis and \
-am downloading some of your articles - contact me at pravda@serhii.net in case \
-there are any issues with that! Serhii."""
+    # let's do _ethical crawling_ (c)(tm)(r)
+    #  POLITE_USERAGENT = """Dear Ukrainska Pravda, I'm writing a masters thesis and \
+    #  am downloading some of your articles - contact me at pravda@serhii.net in case \
+    #  there are any issues with that! Serhii."""
+    POLITE_USERAGENT = """UP Crawler (https://github.com/pchr8/up_crawler) is
+    used to crawl your articles. """
 
     max_wait_sec: int = 2
     wait_eps: int = 3
@@ -47,7 +51,6 @@ there are any issues with that! Serhii."""
         return wait_time
 
 
-
 def _slightly_change_num(num: float, eps=0.01, only_positive: bool = True) -> float:
     """Randomly change value of num to within num-eps>new_num>num+eps"""
     res = num - eps + random.random() * eps * 2
@@ -58,8 +61,9 @@ def _slightly_change_num(num: float, eps=0.01, only_positive: bool = True) -> fl
 
 ## CLI
 
+
 def _parse_timeout(args) -> RandomizationParams:
-    """ Parse CLI arguments arguments. """
+    """Parse CLI arguments arguments."""
     if args.timeout == -1:
         rw = RandomizationParams(max_wait_sec=0, wait_eps=0)
     else:
