@@ -78,9 +78,8 @@ class UPSitemapCrawler:
 
     @classmethod
     def _get_sitemap_uri_for_month(cls, day: datetime):
-        # TODO - error out if we're in the future
         # TODO - handle archive VS news sitemaps
-        if day.month > datetime.now().month:
+        if day.replace(day=1) > datetime.now().replace(day=1):
             logger.error(f"{day} is in the future, no sitemap!")
             return None
 
@@ -203,6 +202,8 @@ class UPSitemapCrawler:
             if df_articles is None:
                 continue
             all_arts.append(df_articles)
+        if not all_arts:
+            raise ValueError(f"No sitemaps found for the relevant months: {months_range}")
         df_full = pd.concat(all_arts)
         df_filt = self._filter_arts_by_hr_date(df_full, d1p, d2p)
         df_filt = df_filt.sort_values("date")
