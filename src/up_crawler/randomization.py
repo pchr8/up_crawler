@@ -21,8 +21,7 @@ class RandomizationParams:
     #  POLITE_USERAGENT = """Dear Ukrainska Pravda, I'm writing a masters thesis and \
     #  am downloading some of your articles - contact me at pravda@serhii.net in case \
     #  there are any issues with that! Serhii."""
-    POLITE_USERAGENT = """UP Crawler (https://github.com/pchr8/up_crawler) is
-    used to crawl your articles. """
+    POLITE_USERAGENT = """UP Crawler (https://github.com/pchr8/up_crawler) is used to crawl your articles."""
 
     max_wait_sec: int = 2
     wait_eps: int = 3
