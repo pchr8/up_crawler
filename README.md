@@ -1,8 +1,21 @@
-## NOTE
-The script is done in the context of my Master's Thesis.
+> [!NOTE]
+> The script was written in the context of my Master's Thesis, and while it does work, 
+> it's a work in progress. I'll add better documentation and tests later if time allows
+> and if there's any interest at all by anyone in the crawler itself (so **please** let me 
+> know if it's useful to you, this directly impacts whether it'll be maintained at all
+> or not).
 
-The script works but is still a work in progress, I'll add better documentation and tests
-later on as I'll be nearing to the end of my thesis, if time allows.
+## Ukrainska Pravda Crawler
+Download [Українська правда](https://www.pravda.com.ua/) articles from a range of dates, 
+with all translations of that article.
+
+Create unified list of tags, with all translations for each of them as well.
+
+It has the following parts, all working as standalone commands as well:
+- `up_run` downloads the dataset, documented below. It uses:
+	- `up_get_uris` crawls the website and gets the list of URIs of articles to crawl from the sitemap 
+	- `up_craw_uris` downloads the articles from the CSV list built by the `up_get_uris` script.
+- `up_convert` converts the native JSON directory structure format to CSV.
 
 ## The dataset
 The last 2 years of articles in CSV format are uploaded to the HF Hub: [shamotskyi/ukr_pravda_2y · Datasets at Hugging Face](https://huggingface.co/datasets/shamotskyi/ukr_pravda_2y)
@@ -10,11 +23,6 @@ The last 2 years of articles in CSV format are uploaded to the HF Hub: [shamotsk
 The script generates .json files that contain additional info, like the raw HTML
 of the articles. They were omitted from the CSV version above, contact me if interested.
 
-## Ukrainska Pravda Crawler
-Download [Українська правда](https://www.pravda.com.ua/) articles from a range of dates, 
-including all translations available.
-
-Create unified list of tags, with all translations for each of them as well.
 
 ## Howto
 ### Install
@@ -88,6 +96,8 @@ one to three files named like `eng_aHR0cHM6Ly93d3cucHJhdmRhLmNvbS51YS9lbmcvbmV3c
 - `tags_mapping.json` contains all tags used in all translations available.
 - `uris.csv` has a list of all articles+translations published in the range of dates given, the ones that are to be downloaded
 
-
 ## Limitations
-Downloads only articles older than about 15 days, since newer articles aren't  available through UP's archive sitemaps. 
+- Downloads only articles older than about 15 days, since newer articles aren't available through UP's archive sitemaps. 
+	- Would be trivial to implement but I just don't have the resources for it, pull-requests welcome.
+- Older articles that use a different article structure (sometimes have missing authors etc.) break it
+	- Again trivial to fix if needed.
